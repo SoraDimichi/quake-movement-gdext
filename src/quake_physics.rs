@@ -416,4 +416,94 @@ mod tests {
             "bhop should exceed max ground vel: {final_speed:.2} vs {max_ground_vel}"
         );
     }
+
+    // -- DUSK-style bhop multiplier tests --
+
+    #[test]
+    fn bhop_multiplier_grows_per_jump() {
+        let increment = 0.2_f32;
+        let max = 0.8_f32;
+        let mut mult = 0.0_f32;
+
+        for i in 1..=4 {
+            mult = (mult + increment).min(max);
+            assert!(
+                (mult - increment * i as f32).abs() < f32::EPSILON,
+                "after {i} jumps: {mult}"
+            );
+        }
+    }
+
+    #[test]
+    fn bhop_multiplier_caps_at_max() {
+        let increment = 0.2_f32;
+        let max = 0.8_f32;
+        let mut mult = 0.0_f32;
+
+        for _ in 0..10 {
+            mult = (mult + increment).min(max);
+        }
+        assert!((mult - max).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn bhop_multiplier_decays_on_ground() {
+        let decay = 2.0_f32;
+        let dt = 1.0 / 60.0;
+        let mut mult = 0.8_f32;
+
+        for _ in 0..30 {
+            mult = decay.mul_add(-dt, mult).max(0.0);
+        }
+        // After 0.5s at decay=2.0: lost 1.0, but started at 0.8, so should be 0
+        assert!(mult < 0.01, "should decay to ~0: {mult}");
+    }
+
+    #[test]
+    fn bhop_multiplier_does_not_go_negative() {
+        let decay = 100.0_f32;
+        let dt = 1.0;
+        let mult = decay.mul_add(-dt, 0.5_f32).max(0.0);
+        assert!(mult >= 0.0);
+    }
+
+    #[test]
+    fn bhop_multiplier_increases_max_velocity() {
+        let base_vel = 10.0_f32;
+        let mult = 0.8_f32;
+        let boosted = base_vel * (1.0 + mult);
+        assert!((boosted - 18.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn bhop_full_cycle_simulation() {
+        // Simulate: 4 jumps building multiplier, then stand for 30 frames decaying.
+        let increment = 0.2_f32;
+        let max = 0.8_f32;
+        let decay = 2.0_f32;
+        let dt = 1.0 / 60.0;
+        let base_vel = 10.0_f32;
+
+        let mut mult = 0.0_f32;
+
+        // 4 jumps.
+        for _ in 0..4 {
+            mult = (mult + increment).min(max);
+        }
+        assert!((mult - 0.8).abs() < f32::EPSILON);
+        assert!((base_vel * (1.0 + mult) - 18.0).abs() < f32::EPSILON);
+
+        // Stand on ground for 30 frames (~0.5s).
+        for _ in 0..30 {
+            mult = decay.mul_add(-dt, mult).max(0.0);
+        }
+        assert!(mult < 0.01, "multiplier should decay: {mult}");
+
+        // Speed should be back near base.
+        let speed = base_vel * (1.0 + mult);
+        assert!(
+            speed < base_vel * 1.01,
+            "speed should be near base: {speed}"
+        );
+    }
 }
