@@ -1,10 +1,66 @@
 //! Pure math functions implementing Quake movement physics.
 //!
-//! Faithful port of id Software's Quake source (`sv_user.c`).
+//! Faithful port of id Software's Quake source (`sv_user.c`, `view.c`, `q_math.c`).
 //! These are stateless functions that only depend on `Vector3`.
 //! They can be tested with `cargo test` without a Godot runtime.
+//!
+//! Uses the Fast Inverse Square Root (`Q_rsqrt`) from Quake III Arena
+//! for vector length and normalization.
 
 use godot::prelude::Vector3;
+
+/// Fast Inverse Square Root (`Q_rsqrt` from Quake III Arena's `q_math.c`).
+///
+/// Computes `1 / sqrt(number)` using the famous bit-manipulation trick
+/// by id Software. One iteration of Newton's method for refinement.
+///
+/// ```c
+/// // Original C (id Software, GPL):
+/// float Q_rsqrt(float number) {
+///     long i;
+///     float x2, y;
+///     const float threehalfs = 1.5F;
+///     x2 = number * 0.5F;
+///     y = number;
+///     i = *(long *)&y;
+///     i = 0x5f3759df - (i >> 1);  // what the fuck?
+///     y = *(float *)&i;
+///     y = y * (threehalfs - (x2 * y * y));
+///     return y;
+/// }
+/// ```
+#[must_use]
+pub fn q_rsqrt(number: f32) -> f32 {
+    let x2 = number * 0.5;
+    let i = 0x5f37_59df - (f32::to_bits(number) >> 1);
+    let y = f32::from_bits(i);
+    // Newton's method: y = y * (1.5 - x2 * y * y)
+    let yy = y * y;
+    y * (-x2).mul_add(yy, 1.5)
+}
+
+/// Vector length using Fast Inverse Square Root.
+///
+/// `length = 1 / rsqrt(x*x + y*y + z*z)` which avoids `sqrt` entirely.
+#[must_use]
+pub fn q_vec_length(v: Vector3) -> f32 {
+    let sq = v.x.mul_add(v.x, v.y.mul_add(v.y, v.z * v.z));
+    if sq < 0.000_001 {
+        return 0.0;
+    }
+    // length = sqrt(sq) = sq * rsqrt(sq) = sq * Q_rsqrt(sq)
+    sq * q_rsqrt(sq)
+}
+
+/// Horizontal (XZ) vector length using Fast Inverse Square Root.
+#[must_use]
+pub fn q_horizontal_length(v: Vector3) -> f32 {
+    let sq = v.x.mul_add(v.x, v.z * v.z);
+    if sq < 0.000_001 {
+        return 0.0;
+    }
+    sq * q_rsqrt(sq)
+}
 
 /// Quake ground acceleration (`SV_Accelerate`).
 ///
@@ -57,7 +113,7 @@ pub fn air_accelerate(
 /// to prevent infinite sliding at low speeds.
 #[must_use]
 pub fn apply_friction(velocity: Vector3, friction: f32, stop_speed: f32, dt: f32) -> Vector3 {
-    let speed = velocity.length();
+    let speed = q_vec_length(velocity);
     if speed < 0.001 {
         return Vector3::ZERO;
     }
@@ -364,5 +420,38 @@ mod tests {
         let right_roll = calc_roll(Vector3::new(5.0, 0.0, 0.0), right, 2.0, 10.0);
         assert!(left < 0.0);
         assert!(right_roll > 0.0);
+    }
+
+    // -- Q_rsqrt tests --
+
+    #[test]
+    fn q_rsqrt_accuracy() {
+        // Q_rsqrt(4.0) should be ~0.5 (1/sqrt(4) = 0.5)
+        let result = q_rsqrt(4.0);
+        assert!((result - 0.5).abs() < 0.01, "got {result}");
+    }
+
+    #[test]
+    fn q_rsqrt_one() {
+        let result = q_rsqrt(1.0);
+        assert!((result - 1.0).abs() < 0.02, "got {result}");
+    }
+
+    #[test]
+    fn q_vec_length_accuracy() {
+        // length of (3, 4, 0) = 5
+        let result = q_vec_length(Vector3::new(3.0, 4.0, 0.0));
+        assert!((result - 5.0).abs() < 0.05, "got {result}");
+    }
+
+    #[test]
+    fn q_vec_length_zero() {
+        assert!(q_vec_length(Vector3::ZERO) < 0.001);
+    }
+
+    #[test]
+    fn q_horizontal_length_ignores_y() {
+        let result = q_horizontal_length(Vector3::new(3.0, 100.0, 4.0));
+        assert!((result - 5.0).abs() < 0.05, "got {result}");
     }
 }

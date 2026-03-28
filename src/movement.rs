@@ -179,8 +179,7 @@ impl QuakeController {
     #[func]
     #[must_use]
     pub fn get_horizontal_speed(&self) -> f32 {
-        let vel = self.base().get_velocity();
-        Vector3::new(vel.x, 0.0, vel.z).length()
+        quake_physics::q_horizontal_length(self.base().get_velocity())
     }
 
     #[func]
@@ -205,8 +204,7 @@ impl QuakeController {
 impl QuakeController {
     #[must_use]
     pub fn horizontal_speed(&self) -> f32 {
-        let vel = self.base().get_velocity();
-        Vector3::new(vel.x, 0.0, vel.z).length()
+        quake_physics::q_horizontal_length(self.base().get_velocity())
     }
 
     #[must_use]
