@@ -17,3 +17,10 @@ godot = { git = "https://github.com/godot-rust/gdext.git", features = ["register
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+# gdext framework limitations — these lints trigger on macro-generated code:
+# - must_use_candidate: #[derive(GodotClass)] generates getters for #[export] fields
+# - struct_excessive_bools: internal state bools (is_crouching, was_on_floor) are unavoidable
+# - missing_const_for_fn: #[func] macro doesn't support const fn
+must_use_candidate = "allow"
+struct_excessive_bools = "allow"
+missing_const_for_fn = "allow"
