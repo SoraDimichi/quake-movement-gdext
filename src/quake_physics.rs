@@ -6,49 +6,42 @@
 
 use godot::prelude::Vector3;
 
-/// Quake ground acceleration (`SV_Accelerate`).
+/// Source-engine ground acceleration.
 ///
-/// Formula: `accelspeed = accel * dt * wishspeed`, capped at `addspeed`.
-/// The `wishspeed` multiplier means acceleration scales with desired speed.
+/// Projects current velocity onto the wish direction, then accelerates
+/// up to `max_vel` along that direction. Speed above `max_vel` is preserved
+/// (never decelerated) — this is what enables bunny hopping.
+///
+/// Based on bhop3d's implementation tuned for Godot's meter-scale units.
 #[must_use]
 pub fn accelerate(
     prev_velocity: Vector3,
-    wish_dir: Vector3,
-    wish_speed: f32,
+    accel_dir: Vector3,
     accel: f32,
+    max_vel: f32,
     dt: f32,
 ) -> Vector3 {
-    let current_speed = prev_velocity.dot(wish_dir);
-    let add_speed = wish_speed - current_speed;
-    if add_speed <= 0.0 {
-        return prev_velocity;
-    }
-    let accel_speed = (accel * dt * wish_speed).min(add_speed);
-    prev_velocity + wish_dir * accel_speed
+    let projected_vel = prev_velocity.dot(accel_dir);
+    let accel_vel = (max_vel - projected_vel).clamp(0.0, accel * dt);
+    prev_velocity + accel_dir * accel_vel
 }
 
-/// Quake air acceleration (`SV_AirAccelerate`).
+/// Source-engine air acceleration.
 ///
-/// Critical difference from ground: `wishspd` is clamped to `air_cap` (30 in Quake)
-/// for the `addspeed` check, but the full `wish_speed` is used for `accelspeed`.
-/// This asymmetry is what enables bunny hopping and air strafing.
+/// Same formula as ground but with a separate `max_air_vel` cap.
+/// The low air cap (typically 1.5) means perpendicular strafing always
+/// has room to accelerate, enabling air strafing speed gains.
 #[must_use]
 pub fn air_accelerate(
     prev_velocity: Vector3,
-    wish_dir: Vector3,
-    wish_speed: f32,
+    accel_dir: Vector3,
     accel: f32,
-    air_cap: f32,
+    max_air_vel: f32,
     dt: f32,
 ) -> Vector3 {
-    let capped_wish_speed = wish_speed.min(air_cap);
-    let current_speed = prev_velocity.dot(wish_dir);
-    let add_speed = capped_wish_speed - current_speed;
-    if add_speed <= 0.0 {
-        return prev_velocity;
-    }
-    let accel_speed = (accel * dt * wish_speed).min(add_speed);
-    prev_velocity + wish_dir * accel_speed
+    let projected_vel = prev_velocity.dot(accel_dir);
+    let accel_vel = (max_air_vel - projected_vel).clamp(0.0, accel * dt);
+    prev_velocity + accel_dir * accel_vel
 }
 
 /// Quake ground friction (`SV_UserFriction` / `PM_Friction`).
@@ -134,33 +127,33 @@ pub fn lerp_f32(from: f32, to: f32, weight: f32) -> f32 {
 mod tests {
     use super::*;
 
-    // -- ground accelerate tests --
+    // -- accelerate tests --
 
     #[test]
     fn accelerate_from_zero() {
+        // accelerate(vel, dir, accel, max_vel, dt)
         let result = accelerate(
             Vector3::ZERO,
             Vector3::new(1.0, 0.0, 0.0),
-            10.0,
+            250.0,
             10.0,
             1.0 / 60.0,
         );
-        // accelspeed = 10 * (1/60) * 10 = 1.667, addspeed = 10, so accelspeed = 1.667
-        assert!((result.x - 10.0 / 60.0 * 10.0).abs() < 0.01);
+        // accel_vel = min(10 - 0, 250/60) = min(10, 4.17) = 4.17
+        let expected = (250.0_f32 / 60.0).min(10.0);
+        assert!((result.x - expected).abs() < 0.01);
     }
 
     #[test]
-    fn accelerate_caps_at_addspeed() {
-        // Already at 9.5, wishspeed 10: addspeed = 0.5
+    fn accelerate_caps_at_max_vel() {
         let result = accelerate(
-            Vector3::new(9.5, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
             Vector3::new(1.0, 0.0, 0.0),
-            10.0,
+            250.0,
             10.0,
             1.0 / 60.0,
         );
-        // addspeed = 0.5, accelspeed = 1.667 → capped to 0.5
-        assert!((result.x - 10.0).abs() < 0.01);
+        assert!((result.x - 10.0).abs() < 0.001);
     }
 
     #[test]
@@ -168,7 +161,7 @@ mod tests {
         let result = accelerate(
             Vector3::new(20.0, 0.0, 0.0),
             Vector3::new(1.0, 0.0, 0.0),
-            10.0,
+            250.0,
             10.0,
             1.0 / 60.0,
         );
@@ -180,14 +173,14 @@ mod tests {
         let a = accelerate(
             Vector3::new(5.0, 0.0, 3.0),
             Vector3::new(0.707, 0.0, 0.707),
-            10.0,
+            250.0,
             10.0,
             1.0 / 60.0,
         );
         let b = accelerate(
             Vector3::new(5.0, 0.0, 3.0),
             Vector3::new(0.707, 0.0, 0.707),
-            10.0,
+            250.0,
             10.0,
             1.0 / 60.0,
         );
@@ -200,40 +193,9 @@ mod tests {
     fn air_accelerate_perpendicular_gains_speed() {
         let forward = Vector3::new(0.0, 0.0, 10.0);
         let wish_right = Vector3::new(1.0, 0.0, 0.0);
-        let result = air_accelerate(forward, wish_right, 10.0, 10.0, 30.0, 1.0 / 60.0);
+        // air_accelerate(vel, dir, accel, max_air_vel, dt)
+        let result = air_accelerate(forward, wish_right, 85.0, 1.5, 1.0 / 60.0);
         assert!(result.length() > forward.length());
-    }
-
-    #[test]
-    fn air_accelerate_caps_wishspeed() {
-        // wish_speed = 100, air_cap = 30 → capped to 30 for addspeed check
-        let result = air_accelerate(
-            Vector3::new(25.0, 0.0, 0.0),
-            Vector3::new(1.0, 0.0, 0.0),
-            100.0,
-            10.0,
-            30.0,
-            1.0 / 60.0,
-        );
-        // addspeed = 30 - 25 = 5, accelspeed = 10 * (1/60) * 100 = 16.67 → capped to 5
-        assert!((result.x - 30.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn air_accelerate_uses_full_wishspeed_for_accel() {
-        // At speed 0, wish_speed = 100, air_cap = 30
-        // addspeed = 30 - 0 = 30, accelspeed = 10 * (1/60) * 100 = 16.67
-        // Result: 16.67 (accelspeed < addspeed)
-        let result = air_accelerate(
-            Vector3::ZERO,
-            Vector3::new(1.0, 0.0, 0.0),
-            100.0,
-            10.0,
-            30.0,
-            1.0 / 60.0,
-        );
-        let expected = 10.0 / 60.0 * 100.0;
-        assert!((result.x - expected).abs() < 0.01);
     }
 
     // -- friction tests --
