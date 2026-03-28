@@ -1,0 +1,19 @@
+[package]
+name = "quake-movement-gdext"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Quake/Source-style movement controller for Godot 4, written in Rust using gdext"
+repository = "https://github.com/SoraDimichi/quake-movement-gdext"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+godot = { git = "https://github.com/godot-rust/gdext.git", features = ["register-docs"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
