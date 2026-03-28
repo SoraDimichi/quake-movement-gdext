@@ -26,22 +26,29 @@ pub fn accelerate(
     prev_velocity + accel_dir * accel_vel
 }
 
-/// Source-engine air acceleration.
+/// Quake air acceleration (`SV_AirAccelerate`).
 ///
-/// Same formula as ground but with a separate `max_air_vel` cap.
-/// The low air cap (typically 1.5) means perpendicular strafing always
-/// has room to accelerate, enabling air strafing speed gains.
+/// The `wish_speed` (capped at `air_cap` for the addspeed check) determines
+/// when acceleration stops. But the full `wish_speed` is used for computing
+/// `accelspeed = accel * dt * wish_speed`, giving strong air control.
+/// This asymmetry is what makes bhop work even while holding W.
 #[must_use]
 pub fn air_accelerate(
     prev_velocity: Vector3,
     accel_dir: Vector3,
+    wish_speed: f32,
     accel: f32,
-    max_air_vel: f32,
+    air_cap: f32,
     dt: f32,
 ) -> Vector3 {
-    let projected_vel = prev_velocity.dot(accel_dir);
-    let accel_vel = (max_air_vel - projected_vel).clamp(0.0, accel * dt);
-    prev_velocity + accel_dir * accel_vel
+    let capped = wish_speed.min(air_cap);
+    let current_speed = prev_velocity.dot(accel_dir);
+    let add_speed = capped - current_speed;
+    if add_speed <= 0.0 {
+        return prev_velocity;
+    }
+    let accel_speed = (accel * dt * wish_speed).min(add_speed);
+    prev_velocity + accel_dir * accel_speed
 }
 
 /// Quake ground friction (`SV_UserFriction` / `PM_Friction`).
@@ -193,8 +200,8 @@ mod tests {
     fn air_accelerate_perpendicular_gains_speed() {
         let forward = Vector3::new(0.0, 0.0, 10.0);
         let wish_right = Vector3::new(1.0, 0.0, 0.0);
-        // air_accelerate(vel, dir, accel, max_air_vel, dt)
-        let result = air_accelerate(forward, wish_right, 85.0, 1.5, 1.0 / 60.0);
+        // air_accelerate(vel, dir, wish_speed, accel, air_cap, dt)
+        let result = air_accelerate(forward, wish_right, 10.0, 10.0, 1.5, 1.0 / 60.0);
         assert!(result.length() > forward.length());
     }
 
@@ -326,5 +333,87 @@ mod tests {
         let right_roll = calc_roll(Vector3::new(5.0, 0.0, 0.0), right, 2.0, 10.0);
         assert!(left < 0.0);
         assert!(right_roll > 0.0);
+    }
+
+    // -- bhop simulation test --
+
+    /// Simulates a full bunny hop cycle: air strafe for 30 frames,
+    /// land (friction skipped because jump fires immediately), repeat 4 times.
+    /// Proves that speed increases with each hop — the core bhop mechanic.
+    #[test]
+    fn bhop_simulation_speed_increases() {
+        let dt = 1.0 / 60.0;
+        let max_ground_vel = 10.0_f32;
+        let ground_accel = 250.0_f32;
+        let air_accel = 10.0_f32;
+        let air_cap = 1.5_f32;
+        let friction_val = 6.0_f32;
+        let stop_speed = 1.5_f32;
+        let jump_force = 1.0_f32;
+        let gravity = 30.0_f32;
+
+        // Start on ground, accelerate to max speed.
+        let mut vel = Vector3::ZERO;
+        for _ in 0..60 {
+            vel = apply_friction(vel, friction_val, stop_speed, dt);
+            vel = accelerate(
+                vel,
+                Vector3::new(0.0, 0.0, -1.0),
+                ground_accel,
+                max_ground_vel,
+                dt,
+            );
+        }
+        let ground_speed = Vector3::new(vel.x, 0.0, vel.z).length();
+        assert!(
+            ground_speed > 9.0,
+            "should reach near max ground speed: {ground_speed}"
+        );
+
+        // Now simulate 4 bhop cycles.
+        let mut speeds_at_hop: Vec<f32> = vec![ground_speed];
+        let mut facing_angle: f32 = 0.0;
+        let turn_rate = 3.0_f32; // radians/sec
+
+        for hop in 0..4 {
+            // Jump: additive velocity, skip friction (bhop).
+            vel.y += jump_velocity(jump_force, gravity);
+
+            // Air strafe for 30 frames (alternating left/right each hop).
+            let strafe_sign = if hop % 2 == 0 { 1.0_f32 } else { -1.0_f32 };
+            for _ in 0..30 {
+                // Wishdir: perpendicular to facing (strafe).
+                let wish_angle = facing_angle + strafe_sign * std::f32::consts::FRAC_PI_2;
+                let wishdir = Vector3::new(wish_angle.sin(), 0.0, -wish_angle.cos());
+
+                vel = air_accelerate(vel, wishdir, max_ground_vel, air_accel, air_cap, dt);
+                vel.y -= gravity * dt;
+
+                facing_angle += strafe_sign * turn_rate * dt;
+            }
+
+            // Land: jump immediately (friction skipped).
+            vel.y = 0.0; // simulate landing
+            let h_speed = Vector3::new(vel.x, 0.0, vel.z).length();
+            speeds_at_hop.push(h_speed);
+        }
+
+        // Each hop should be faster than the previous.
+        for i in 1..speeds_at_hop.len() {
+            assert!(
+                speeds_at_hop[i] > speeds_at_hop[i - 1],
+                "hop {i} speed ({:.2}) should exceed hop {} speed ({:.2})",
+                speeds_at_hop[i],
+                i - 1,
+                speeds_at_hop[i - 1]
+            );
+        }
+
+        // Final speed should significantly exceed max ground velocity.
+        let final_speed = speeds_at_hop.last().copied().unwrap_or(0.0);
+        assert!(
+            final_speed > max_ground_vel * 1.2,
+            "bhop should exceed max ground vel: {final_speed:.2} vs {max_ground_vel}"
+        );
     }
 }

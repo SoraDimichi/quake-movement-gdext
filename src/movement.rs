@@ -72,10 +72,10 @@ pub struct QuakeController {
     #[init(val = 10.0)]
     max_ground_velocity: f32,
 
-    /// Max air velocity (controls air strafing tightness).
+    /// Air speed cap for the addspeed check. Low value enables air strafing.
     #[export]
     #[init(val = 1.5)]
-    max_air_velocity: f32,
+    air_cap: f32,
 
     /// Jump force multiplier.
     #[export]
@@ -259,8 +259,9 @@ impl QuakeController {
             vel = quake_physics::air_accelerate(
                 vel,
                 wishdir,
+                max_vel,
                 self.air_accelerate,
-                self.max_air_velocity,
+                self.air_cap,
                 dt,
             );
         }
