@@ -12,7 +12,7 @@
 use crate::movement::QuakeController;
 use crate::quake_physics;
 use godot::classes::{
-    Camera3D, Engine, ICamera3D, Input, InputEvent, InputEventMouseButton, InputEventMouseMotion,
+    Camera3D, ICamera3D, Input, InputEvent, InputEventMouseButton, InputEventMouseMotion,
 };
 use godot::prelude::*;
 
@@ -190,8 +190,7 @@ impl ICamera3D for QuakeCamera {
     }
 
     fn process(&mut self, _delta: f64) {
-        let ticks = Engine::singleton().get_physics_ticks_per_second();
-        let dt = 1.0 / f32::from(i16::try_from(ticks).unwrap_or(60));
+        let dt = crate::util::physics_dt();
         self.elapsed_time += dt;
 
         // Read parent controller state.

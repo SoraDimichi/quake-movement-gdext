@@ -3,10 +3,8 @@
 //! Handles ground/air acceleration, friction, jump, crouch, and DUSK-style bhop.
 //! Does NOT handle camera — see [`crate::camera::QuakeCamera`].
 
-use crate::quake_physics;
-use godot::classes::{
-    CapsuleShape3D, CharacterBody3D, CollisionShape3D, Engine, ICharacterBody3D, Input,
-};
+use crate::{quake_physics, util};
+use godot::classes::{CapsuleShape3D, CharacterBody3D, CollisionShape3D, ICharacterBody3D, Input};
 use godot::prelude::*;
 
 /// Quake-style first-person movement controller with DUSK-style bhop.
@@ -153,8 +151,7 @@ pub struct QuakeController {
 #[godot_api]
 impl ICharacterBody3D for QuakeController {
     fn physics_process(&mut self, _delta: f64) {
-        let ticks = Engine::singleton().get_physics_ticks_per_second();
-        let dt = 1.0 / f32::from(i16::try_from(ticks).unwrap_or(60));
+        let dt = util::physics_dt();
 
         let on_floor = self.base().is_on_floor();
         self.just_landed_flag = !self.was_on_floor && on_floor;
