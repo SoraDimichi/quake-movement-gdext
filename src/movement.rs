@@ -1,7 +1,8 @@
-//! Quake/Source-style movement controller for `CharacterBody3D`.
+//! Quake-style movement controller for `CharacterBody3D`.
 //!
-//! Handles ground/air acceleration, friction, bunny hopping, crouch, and coyote time.
-//! Does NOT handle camera — see [`crate::camera::QuakeCamera`] for that.
+//! Faithful to id Software's Quake source (`sv_user.c`).
+//! Handles ground/air acceleration, friction, jump, and crouch.
+//! Does NOT handle camera — see [`crate::camera::QuakeCamera`].
 
 use crate::quake_physics;
 use godot::classes::{
@@ -9,21 +10,18 @@ use godot::classes::{
 };
 use godot::prelude::*;
 
-/// Quake/Source-style first-person movement controller.
+/// Quake-style first-person movement controller.
 ///
-/// Port of [bhop3d](https://github.com/BirDt/bhop3d) by `BirDt` with additions from
-/// [dot-fps-controller](https://github.com/modcommunity/dot-fps-controller).
-/// Based on [Flafla2's bunnyhopping writeup](https://adrianb.io/2015/02/14/bunnyhop.html).
+/// Faithful port of Quake's `SV_Accelerate`, `SV_AirAccelerate`, and `SV_UserFriction`.
 #[derive(GodotClass)]
 #[class(init, base=CharacterBody3D)]
 pub struct QuakeController {
-    // -- Activity Controls --
     /// Whether the character can move.
     #[export]
     #[init(val = true)]
     move_enabled: bool,
 
-    /// Whether holding jump continuously bunny hops.
+    /// Whether holding jump continuously hops.
     #[export]
     #[init(val = false)]
     jump_when_held: bool,
@@ -59,50 +57,40 @@ pub struct QuakeController {
     #[init(val = 30.0)]
     gravity: f32,
 
-    /// Acceleration when grounded.
-    #[export]
-    #[init(val = 250.0)]
-    ground_accelerate: f32,
-
-    /// Acceleration when in the air.
-    #[export]
-    #[init(val = 85.0)]
-    air_accelerate: f32,
-
-    /// Max velocity on the ground.
+    /// Ground acceleration (Quake `sv_accelerate`, default 10).
     #[export]
     #[init(val = 10.0)]
-    max_ground_velocity: f32,
+    ground_accelerate: f32,
 
-    /// Max velocity in the air (controls air strafing tightness).
+    /// Air acceleration (Quake `sv_accelerate` used in `SV_AirAccelerate`).
+    #[export]
+    #[init(val = 10.0)]
+    air_accelerate: f32,
+
+    /// Max ground speed (Quake `sv_maxspeed`).
+    #[export]
+    #[init(val = 10.0)]
+    max_speed: f32,
+
+    /// Air speed cap for the addspeed check (Quake hardcodes 30, scaled for our units).
     #[export]
     #[init(val = 1.5)]
-    max_air_velocity: f32,
+    air_cap: f32,
 
-    /// Jump force multiplier.
+    /// Jump force (height in units the jump should reach).
     #[export]
-    #[init(val = 1.0)]
+    #[init(val = 1.2)]
     jump_force: f32,
 
-    /// Ground friction.
+    /// Ground friction (Quake `sv_friction`, default 4).
     #[export]
-    #[init(val = 6.0)]
+    #[init(val = 4.0)]
     friction: f32,
 
-    /// Minimum control value for friction. Prevents infinite sliding at low speeds.
+    /// Minimum control value for friction. Prevents infinite sliding.
     #[export]
     #[init(val = 1.5)]
     stop_speed: f32,
-
-    /// Bunny hop window in frames (friction skipped during this window after landing).
-    #[export]
-    #[init(val = 2)]
-    bhop_frames: i32,
-
-    /// When true, bhop window uses air acceleration instead of ground.
-    #[export]
-    #[init(val = true)]
-    additive_bhop: bool,
 
     // -- Crouch Parameters --
     /// Standing collision capsule height.
@@ -125,24 +113,12 @@ pub struct QuakeController {
     #[init(val = 10.0)]
     crouch_lerp_speed: f32,
 
-    // -- Coyote Time --
-    /// Frames after leaving an edge where jump is still allowed.
-    #[export]
-    #[init(val = 5)]
-    coyote_frames: i32,
-
     // -- Collision Shape Reference --
     /// `CollisionShape3D` to resize during crouch (must use `CapsuleShape3D`).
     #[export]
     collision_shape: Option<Gd<CollisionShape3D>>,
 
     // -- Internal State --
-    #[init(val = 0)]
-    frame_timer: i32,
-
-    #[init(val = 0)]
-    coyote_timer: i32,
-
     #[init(val = false)]
     is_crouching: bool,
 
@@ -165,30 +141,12 @@ impl ICharacterBody3D for QuakeController {
         let dt = 1.0 / f32::from(i16::try_from(ticks).unwrap_or(60));
 
         let on_floor = self.base().is_on_floor();
-
-        // Detect landing.
         self.just_landed_flag = !self.was_on_floor && on_floor;
-
-        // Update bhop frame timer.
-        if on_floor {
-            self.frame_timer += 1;
-        } else {
-            self.frame_timer = 0;
-        }
-
-        // Update coyote timer.
-        if on_floor {
-            self.coyote_timer = self.coyote_frames;
-        } else if self.coyote_timer > 0 {
-            self.coyote_timer -= 1;
-        }
 
         // Crouch input.
         let input = Input::singleton();
         let crouch_name = StringName::from(&self.crouch_action);
         self.is_crouching = input.is_action_pressed(&crouch_name);
-
-        // Lerp collision height.
         self.update_collision_height(dt);
 
         // Compute velocity.
@@ -204,20 +162,18 @@ impl ICharacterBody3D for QuakeController {
     }
 }
 
-// -- State getters (pub for QuakeCamera, #[func] for GDScript) --
 #[godot_api]
 impl QuakeController {
-    /// Backward-compatible static acceleration function.
-    /// Delegates to [`quake_physics::accelerate`].
+    /// Ground acceleration (delegates to [`quake_physics::accelerate`]).
     #[must_use]
     pub fn accelerate(
         prev_velocity: Vector3,
-        accel_dir: Vector3,
-        acceleration: f32,
-        max_vel: f32,
+        wish_dir: Vector3,
+        wish_speed: f32,
+        accel: f32,
         dt: f32,
     ) -> Vector3 {
-        quake_physics::accelerate(prev_velocity, accel_dir, acceleration, max_vel, dt)
+        quake_physics::accelerate(prev_velocity, wish_dir, wish_speed, accel, dt)
     }
 
     #[func]
@@ -246,7 +202,6 @@ impl QuakeController {
     }
 }
 
-// -- Public Rust-only getters (for QuakeCamera) --
 impl QuakeController {
     #[must_use]
     pub fn horizontal_speed(&self) -> f32 {
@@ -275,54 +230,44 @@ impl QuakeController {
     }
 }
 
-// -- Private implementation --
 impl QuakeController {
     fn compute_velocity(&self, dt: f32, on_floor: bool, input: &Gd<Input>) -> Vector3 {
         let mut vel = self.base().get_velocity();
-        let can_jump = on_floor || self.coyote_timer > 0;
 
-        // Apply friction if grounded and past the bhop window.
-        let use_ground_params = if on_floor && self.frame_timer >= self.bhop_frames {
-            vel = quake_physics::apply_friction(vel, self.friction, self.stop_speed, dt);
-            true
-        } else {
-            // During bhop window: use air params if additive_bhop is on.
-            !self.additive_bhop
-        };
-
-        // Determine params (apply crouch speed factor if crouching and grounded).
-        let mut max_vel = if use_ground_params {
-            self.max_ground_velocity
-        } else {
-            self.max_air_velocity
-        };
-        if self.is_crouching && on_floor {
-            max_vel *= self.crouch_speed_factor;
-        }
-        let accel = if use_ground_params {
-            self.ground_accelerate
-        } else {
-            self.air_accelerate
-        };
-
-        // Wishdir from input.
         let wishdir = self.get_wishdir(input);
+        let mut wish_speed = self.max_speed;
+        if self.is_crouching && on_floor {
+            wish_speed *= self.crouch_speed_factor;
+        }
 
-        // Accelerate.
-        vel = quake_physics::accelerate(vel, wishdir, accel, max_vel, dt);
+        if on_floor {
+            // Ground: friction then accelerate.
+            vel = quake_physics::apply_friction(vel, self.friction, self.stop_speed, dt);
+            vel = quake_physics::accelerate(vel, wishdir, wish_speed, self.ground_accelerate, dt);
+        } else {
+            // Air: air accelerate (no friction).
+            vel = quake_physics::air_accelerate(
+                vel,
+                wishdir,
+                wish_speed,
+                self.air_accelerate,
+                self.air_cap,
+                dt,
+            );
+        }
 
         // Gravity.
         vel += Vector3::DOWN * self.gravity * dt;
 
-        // Jump.
+        // Jump (additive, like Quake: vel.y += jump_velocity).
         let jump_name = StringName::from(&self.jump_action);
         let jump_pressed = if self.jump_when_held {
             input.is_action_pressed(&jump_name)
         } else {
             input.is_action_just_pressed(&jump_name)
         };
-        if jump_pressed && self.move_enabled && can_jump {
-            vel.y = quake_physics::jump_velocity(self.jump_force, self.gravity);
+        if jump_pressed && self.move_enabled && on_floor {
+            vel.y += quake_physics::jump_velocity(self.jump_force, self.gravity);
         }
 
         vel

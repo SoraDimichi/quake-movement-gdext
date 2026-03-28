@@ -2,18 +2,23 @@
 //!
 //! Expects to be a child of [`crate::movement::QuakeController`].
 //! Reads parent state (velocity, grounded, crouching) each frame — never modifies movement.
+//!
+//! Camera effects ported from Quake's `view.c`:
+//! - `V_CalcBob` — asymmetric walk bob proportional to speed
+//! - `V_CalcRoll` — strafe roll proportional to side velocity
+//! - Landing tilt and crouch camera lerp (modern additions)
+//! - FOV scaling with speed (modern addition)
 
 use crate::movement::QuakeController;
 use crate::quake_physics;
 use godot::classes::{
-    Camera3D, ICamera3D, Input, InputEvent, InputEventMouseButton, InputEventMouseMotion,
+    Camera3D, Engine, ICamera3D, Input, InputEvent, InputEventMouseButton, InputEventMouseMotion,
 };
 use godot::prelude::*;
 
 /// First-person camera with mouse look and Quake-style visual effects.
 ///
-/// Place as a child of [`QuakeController`]. Effects include FOV scaling with speed,
-/// head bob, landing tilt, and smooth crouch camera height transitions.
+/// Place as a child of [`QuakeController`].
 #[derive(GodotClass)]
 #[class(init, base=Camera3D)]
 pub struct QuakeCamera {
@@ -54,21 +59,42 @@ pub struct QuakeCamera {
     #[init(val = 8.0)]
     fov_lerp_speed: f32,
 
-    // -- Head Bob --
-    /// Whether head bob is enabled.
+    // -- View Bob (Quake V_CalcBob) --
+    /// Whether view bob is enabled.
     #[export]
     #[init(val = true)]
-    head_bob_enabled: bool,
+    bob_enabled: bool,
 
-    /// Head bob amplitude in units.
+    /// Bob amplitude scale (Quake `cl_bob`, default 0.02).
     #[export]
-    #[init(val = 0.04)]
-    head_bob_amplitude: f32,
+    #[init(val = 0.02)]
+    bob_amount: f32,
 
-    /// Head bob frequency (full cycles per second).
+    /// Full bob cycle duration in seconds (Quake `cl_bobcycle`, default 0.6).
     #[export]
-    #[init(val = 12.0)]
-    head_bob_frequency: f32,
+    #[init(val = 0.6)]
+    bob_cycle: f32,
+
+    /// Fraction of cycle spent going up (Quake `cl_bobup`, default 0.5).
+    #[export]
+    #[init(val = 0.5)]
+    bob_up: f32,
+
+    // -- Strafe Roll (Quake V_CalcRoll) --
+    /// Whether strafe roll is enabled.
+    #[export]
+    #[init(val = true)]
+    roll_enabled: bool,
+
+    /// Max roll angle in degrees (Quake `cl_rollangle`, default 2.0).
+    #[export]
+    #[init(val = 2.0)]
+    roll_angle: f32,
+
+    /// Side speed at which max roll is reached (Quake `cl_rollspeed`, default 10.0).
+    #[export]
+    #[init(val = 10.0)]
+    roll_speed: f32,
 
     // -- Landing Tilt --
     /// Whether landing camera dip is enabled.
@@ -107,7 +133,7 @@ pub struct QuakeCamera {
     current_fov: f32,
 
     #[init(val = 0.0)]
-    bob_timer: f32,
+    elapsed_time: f32,
 
     #[init(val = 0.0)]
     current_landing_tilt: f32,
@@ -164,16 +190,18 @@ impl ICamera3D for QuakeCamera {
     }
 
     fn process(&mut self, _delta: f64) {
-        let ticks = godot::classes::Engine::singleton().get_physics_ticks_per_second();
+        let ticks = Engine::singleton().get_physics_ticks_per_second();
         let dt = 1.0 / f32::from(i16::try_from(ticks).unwrap_or(60));
+        self.elapsed_time += dt;
 
         // Read parent controller state.
-        let (speed, grounded, crouching, just_landed) =
+        let (speed, velocity, grounded, crouching, just_landed) =
             self.get_controller()
-                .map_or((0.0, true, false, false), |controller| {
+                .map_or((0.0, Vector3::ZERO, true, false, false), |controller| {
                     let ctrl = controller.bind();
                     (
                         ctrl.horizontal_speed(),
+                        ctrl.current_velocity(),
                         ctrl.is_grounded(),
                         ctrl.crouching(),
                         ctrl.just_landed(),
@@ -181,10 +209,9 @@ impl ICamera3D for QuakeCamera {
                 });
 
         self.update_fov(speed, dt);
-        self.update_head_bob(speed, grounded, dt);
         self.update_landing_tilt(just_landed, dt);
         self.update_crouch_height(crouching, dt);
-        self.apply_camera_transform();
+        self.apply_camera_transform(speed, velocity, grounded);
     }
 }
 
@@ -201,14 +228,6 @@ impl QuakeCamera {
         let target_fov = t.mul_add(self.max_fov_increase, self.base_fov);
         self.current_fov =
             quake_physics::lerp_f32(self.current_fov, target_fov, self.fov_lerp_speed * dt);
-    }
-
-    fn update_head_bob(&mut self, speed: f32, grounded: bool, dt: f32) {
-        if !self.head_bob_enabled || !grounded || speed < 0.5 {
-            self.bob_timer = 0.0;
-            return;
-        }
-        self.bob_timer += dt * self.head_bob_frequency;
     }
 
     fn update_landing_tilt(&mut self, just_landed: bool, dt: f32) {
@@ -238,10 +257,24 @@ impl QuakeCamera {
         );
     }
 
-    fn apply_camera_transform(&mut self) {
-        // Head bob Y offset.
-        let bob_offset = if self.head_bob_enabled {
-            (self.bob_timer * std::f32::consts::TAU).sin() * self.head_bob_amplitude
+    fn apply_camera_transform(&mut self, speed: f32, velocity: Vector3, grounded: bool) {
+        // Quake V_CalcBob — asymmetric walk bob proportional to speed.
+        let bob_offset = if self.bob_enabled && grounded {
+            quake_physics::calc_bob(
+                self.elapsed_time,
+                speed,
+                self.bob_amount,
+                self.bob_cycle,
+                self.bob_up,
+            )
+        } else {
+            0.0
+        };
+
+        // Quake V_CalcRoll — strafe roll.
+        let roll = if self.roll_enabled {
+            let right = self.base().get_global_transform().basis.col_a();
+            quake_physics::calc_roll(velocity, right, self.roll_angle, self.roll_speed)
         } else {
             0.0
         };
@@ -255,10 +288,11 @@ impl QuakeCamera {
         let fov = self.current_fov;
         self.base_mut().set_fov(fov);
 
-        // Pitch = mouse pitch + landing tilt.
+        // Rotation: pitch (mouse + landing tilt) + roll (strafe).
         let pitch = self.mouse_pitch + self.current_landing_tilt;
         let mut rot = self.base().get_rotation();
         rot.x = pitch;
+        rot.z = roll.to_radians();
         self.base_mut().set_rotation(rot);
     }
 }
