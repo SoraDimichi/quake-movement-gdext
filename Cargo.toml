@@ -8,7 +8,7 @@ repository = "https://github.com/SoraDimichi/quake-movement-gdext"
 publish = false
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 godot = { git = "https://github.com/godot-rust/gdext.git", features = ["register-docs"] }

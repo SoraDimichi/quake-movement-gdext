@@ -205,7 +205,7 @@ impl QuakeController {
     ///
     /// Projects current velocity onto the desired direction, then accelerates
     /// up to `max_vel` along that direction.
-    fn accelerate(
+    pub fn accelerate(
         prev_velocity: Vector3,
         accel_dir: Vector3,
         acceleration: f32,
