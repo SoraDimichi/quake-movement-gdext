@@ -182,9 +182,8 @@ impl ICharacterBody3D for QuakeController {
             self.duck();
             self.signals().crouch_started().emit();
         } else if !wants_crouch && self.is_crouching {
-            let was_crouching = self.is_crouching;
             self.try_unduck();
-            if was_crouching && !self.is_crouching {
+            if !self.is_crouching {
                 self.signals().crouch_ended().emit();
             }
         }
