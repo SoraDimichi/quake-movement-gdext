@@ -4,6 +4,7 @@
 //! Crouch uses Half-Life 1 `PM_Duck`/`PM_UnDuck` pattern: instant hull switch.
 //! Does NOT handle camera — see [`crate::camera::QuakeCamera`].
 
+use crate::jump::{JumpAction, JumpState};
 use crate::quake_physics;
 use godot::classes::{CapsuleShape3D, CharacterBody3D, CollisionShape3D, ICharacterBody3D, Input};
 use godot::prelude::*;
@@ -108,6 +109,17 @@ pub struct QuakeController {
     #[init(val = 0.5)]
     crouch_speed_factor: f32,
 
+    // -- Double Jump --
+    /// Double jump vertical force multiplier (relative to normal jump).
+    #[export]
+    #[init(val = 0.8)]
+    double_jump_force: f32,
+
+    /// Horizontal speed boost on double jump.
+    #[export]
+    #[init(val = 3.0)]
+    double_jump_boost: f32,
+
     // -- Internal State --
     #[init(val = false)]
     is_crouching: bool,
@@ -118,8 +130,8 @@ pub struct QuakeController {
     #[init(val = false)]
     just_landed_flag: bool,
 
-    #[init(val = false)]
-    jump_consumed: bool,
+    #[init(val = JumpState::new())]
+    jump_state: JumpState,
 
     #[init(val = 0.0)]
     bhop_multiplier_val: f32,
@@ -277,15 +289,8 @@ impl QuakeController {
 
         let jump_name = StringName::from(&self.jump_action);
         let space_held = input.is_action_pressed(&jump_name);
-        let jumping = if on_floor && space_held && !self.jump_consumed && self.move_enabled {
-            self.jump_consumed = true;
-            true
-        } else {
-            if !space_held {
-                self.jump_consumed = false;
-            }
-            false
-        };
+        let jump_action = self.jump_state.update(space_held, on_floor);
+        let jumping = matches!(jump_action, JumpAction::Jump);
 
         if jumping {
             self.bhop_multiplier_val =
@@ -320,8 +325,22 @@ impl QuakeController {
 
         vel += Vector3::DOWN * self.gravity * dt;
 
-        if jumping {
-            vel.y += quake_physics::jump_velocity(self.jump_force, self.gravity);
+        match jump_action {
+            JumpAction::Jump => {
+                vel.y += quake_physics::jump_velocity(self.jump_force, self.gravity);
+            }
+            JumpAction::DoubleJump => {
+                vel.y = quake_physics::jump_velocity(
+                    self.jump_force * self.double_jump_force,
+                    self.gravity,
+                );
+                if wishdir.length() > 0.1 {
+                    let boost = wishdir.normalized() * self.double_jump_boost;
+                    vel.x += boost.x;
+                    vel.z += boost.z;
+                }
+            }
+            JumpAction::None => {}
         }
 
         vel
