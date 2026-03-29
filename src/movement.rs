@@ -221,39 +221,11 @@ impl QuakeController {
     pub fn get_bhop_multiplier(&self) -> f32 {
         self.bhop_multiplier_val
     }
-}
 
-// -- Rust-only getters (for QuakeCamera) --
-impl QuakeController {
+    #[func]
     #[must_use]
-    pub fn horizontal_speed(&self) -> f32 {
-        let vel = self.base().get_velocity();
-        Vector3::new(vel.x, 0.0, vel.z).length()
-    }
-
-    #[must_use]
-    pub fn is_grounded(&self) -> bool {
-        self.base().is_on_floor()
-    }
-
-    #[must_use]
-    pub const fn crouching(&self) -> bool {
-        self.is_crouching
-    }
-
-    #[must_use]
-    pub const fn just_landed(&self) -> bool {
-        self.just_landed_flag
-    }
-
-    #[must_use]
-    pub fn current_velocity(&self) -> Vector3 {
+    pub fn get_current_velocity(&self) -> Vector3 {
         self.base().get_velocity()
-    }
-
-    #[must_use]
-    pub const fn bhop_multiplier(&self) -> f32 {
-        self.bhop_multiplier_val
     }
 }
 

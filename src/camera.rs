@@ -199,11 +199,11 @@ impl ICamera3D for QuakeCamera {
                 .map_or((0.0, Vector3::ZERO, true, false, false), |controller| {
                     let ctrl = controller.bind();
                     (
-                        ctrl.horizontal_speed(),
-                        ctrl.current_velocity(),
-                        ctrl.is_grounded(),
-                        ctrl.crouching(),
-                        ctrl.just_landed(),
+                        ctrl.get_horizontal_speed(),
+                        ctrl.get_current_velocity(),
+                        ctrl.get_is_grounded(),
+                        ctrl.get_is_crouching(),
+                        ctrl.get_just_landed(),
                     )
                 });
 
