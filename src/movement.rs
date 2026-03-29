@@ -1,16 +1,18 @@
 //! Quake-style movement controller for `CharacterBody3D`.
 //!
 //! Handles ground/air acceleration, friction, jump, crouch, and DUSK-style bhop.
+//! Crouch uses Half-Life 1 `PM_Duck`/`PM_UnDuck` pattern: instant hull switch.
 //! Does NOT handle camera — see [`crate::camera::QuakeCamera`].
 
-use crate::{quake_physics, util};
+use crate::quake_physics;
 use godot::classes::{CapsuleShape3D, CharacterBody3D, CollisionShape3D, ICharacterBody3D, Input};
 use godot::prelude::*;
 
-/// Quake-style first-person movement controller with DUSK-style bhop.
+/// Quake-style first-person movement controller.
 ///
-/// Movement physics from Quake's `SV_Accelerate`, `SV_AirAccelerate`, `SV_UserFriction`.
-/// Bhop system inspired by DUSK: consecutive jumps build a speed multiplier.
+/// Movement: Quake `SV_Accelerate`/`SV_AirAccelerate`/`SV_UserFriction`.
+/// Bhop: DUSK-style per-jump speed multiplier.
+/// Crouch: Half-Life 1 instant hull switch with `test_move` anti-stuck.
 #[derive(GodotClass)]
 #[class(init, base=CharacterBody3D)]
 pub struct QuakeController {
@@ -45,63 +47,52 @@ pub struct QuakeController {
     crouch_action: GString,
 
     // -- Movement Parameters --
-    /// Gravity in units per second squared.
     #[export]
     #[init(val = 30.0)]
     gravity: f32,
 
-    /// Ground acceleration.
     #[export]
     #[init(val = 250.0)]
     ground_accelerate: f32,
 
-    /// Air acceleration.
     #[export]
     #[init(val = 85.0)]
     air_accelerate: f32,
 
-    /// Max ground velocity.
     #[export]
     #[init(val = 10.0)]
     max_ground_velocity: f32,
 
-    /// Air speed cap for the addspeed check.
     #[export]
     #[init(val = 1.5)]
     air_cap: f32,
 
-    /// Jump force (height in units).
     #[export]
     #[init(val = 1.0)]
     jump_force: f32,
 
-    /// Ground friction.
     #[export]
     #[init(val = 6.0)]
     friction: f32,
 
-    /// Minimum control value for friction.
     #[export]
     #[init(val = 1.5)]
     stop_speed: f32,
 
-    // -- Bhop (DUSK-style) --
-    /// Speed multiplier gained per consecutive jump.
+    // -- Bhop --
     #[export]
     #[init(val = 0.2)]
     bhop_increment: f32,
 
-    /// Max bhop multiplier (1.0 + this = max speed factor).
     #[export]
     #[init(val = 0.8)]
     bhop_max: f32,
 
-    /// How fast the multiplier decays on ground (per second).
     #[export]
     #[init(val = 2.0)]
     bhop_decay: f32,
 
-    // -- Crouch Parameters --
+    // -- Crouch (Half-Life 1 instant switch) --
     /// Standing collision capsule height.
     #[export]
     #[init(val = 1.8)]
@@ -117,21 +108,9 @@ pub struct QuakeController {
     #[init(val = 0.5)]
     crouch_speed_factor: f32,
 
-    /// Crouch height transition speed.
-    #[export]
-    #[init(val = 10.0)]
-    crouch_lerp_speed: f32,
-
-    // -- Collision Shape Reference --
-    #[export]
-    collision_shape: Option<Gd<CollisionShape3D>>,
-
     // -- Internal State --
     #[init(val = false)]
     is_crouching: bool,
-
-    #[init(val = 1.8)]
-    current_height: f32,
 
     #[init(val = false)]
     was_on_floor: bool,
@@ -150,34 +129,32 @@ pub struct QuakeController {
 
 #[godot_api]
 impl ICharacterBody3D for QuakeController {
-    fn physics_process(&mut self, _delta: f64) {
-        let dt = util::physics_dt();
+    fn physics_process(&mut self, delta: f64) {
+        let dt = delta as f32;
 
         let on_floor = self.base().is_on_floor();
         self.just_landed_flag = !self.was_on_floor && on_floor;
 
-        // Crouch.
+        // Half-Life 1 crouch: instant hull switch.
         let input = Input::singleton();
         let crouch_name = StringName::from(&self.crouch_action);
-        self.is_crouching = input.is_action_pressed(&crouch_name);
-        self.update_collision_height(dt);
+        let wants_crouch = input.is_action_pressed(&crouch_name);
+        if wants_crouch && !self.is_crouching {
+            self.duck();
+        } else if !wants_crouch && self.is_crouching {
+            self.try_unduck();
+        }
 
-        // Velocity.
         let velocity = self.compute_velocity(dt, on_floor, &input);
         self.base_mut().set_velocity(velocity);
         self.base_mut().move_and_slide();
 
         self.was_on_floor = on_floor;
     }
-
-    fn ready(&mut self) {
-        self.current_height = self.stand_height;
-    }
 }
 
 #[godot_api]
 impl QuakeController {
-    /// Ground acceleration (delegates to [`quake_physics::accelerate`]).
     #[must_use]
     pub fn accelerate(
         prev_velocity: Vector3,
@@ -255,12 +232,49 @@ impl QuakeController {
 }
 
 impl QuakeController {
+    /// Instantly switch to crouch hull (Half-Life `PM_Duck`).
+    fn duck(&mut self) {
+        self.is_crouching = true;
+        self.set_hull_height(self.crouch_height);
+    }
+
+    /// Try to uncrouch. If standing hull overlaps, stay ducked (Half-Life `PM_UnDuck`).
+    fn try_unduck(&mut self) {
+        let prev = self.get_hull_height();
+        self.set_hull_height(self.stand_height);
+
+        let transform = self.base().get_global_transform();
+        if self.base_mut().test_move(transform, Vector3::ZERO) {
+            self.set_hull_height(prev);
+        } else {
+            self.is_crouching = false;
+        }
+    }
+
+    fn set_hull_height(&self, height: f32) {
+        let Some(shape_node) = self.base().try_get_node_as::<CollisionShape3D>("Collision") else {
+            return;
+        };
+        let Some(shape_res) = shape_node.get_shape() else {
+            return;
+        };
+        if let Ok(mut capsule) = shape_res.try_cast::<CapsuleShape3D>() {
+            capsule.set_height(height);
+        }
+    }
+
+    fn get_hull_height(&self) -> f32 {
+        self.base()
+            .try_get_node_as::<CollisionShape3D>("Collision")
+            .and_then(|n| n.get_shape())
+            .and_then(|s| s.try_cast::<CapsuleShape3D>().ok())
+            .map_or(self.stand_height, |c| c.get_height())
+    }
+
     fn compute_velocity(&mut self, dt: f32, on_floor: bool, input: &Gd<Input>) -> Vector3 {
         let mut vel = self.base().get_velocity();
         let wishdir = self.get_wishdir(input);
 
-        // Jump: press to jump, must release between jumps (no auto-hop).
-        // Hold space before landing — fires on touchdown.
         let jump_name = StringName::from(&self.jump_action);
         let space_held = input.is_action_pressed(&jump_name);
         let jumping = if on_floor && space_held && !self.jump_consumed && self.move_enabled {
@@ -273,7 +287,6 @@ impl QuakeController {
             false
         };
 
-        // Bhop multiplier: grows on jump, decays on ground.
         if jumping {
             self.bhop_multiplier_val =
                 (self.bhop_multiplier_val + self.bhop_increment).min(self.bhop_max);
@@ -284,7 +297,6 @@ impl QuakeController {
                 .max(0.0);
         }
 
-        // Max velocity with bhop and crouch applied.
         let mut max_vel = self.max_ground_velocity * (1.0 + self.bhop_multiplier_val);
         if self.is_crouching && on_floor {
             max_vel *= self.crouch_speed_factor;
@@ -294,7 +306,6 @@ impl QuakeController {
             vel = quake_physics::apply_friction(vel, self.friction, self.stop_speed, dt);
             vel = quake_physics::accelerate(vel, wishdir, self.ground_accelerate, max_vel, dt);
         } else if on_floor {
-            // Jumping frame: skip friction (bhop).
             vel = quake_physics::accelerate(vel, wishdir, self.ground_accelerate, max_vel, dt);
         } else {
             vel = quake_physics::air_accelerate(
@@ -330,25 +341,5 @@ impl QuakeController {
         let side_axis = input.get_axis(&left, &right);
 
         basis.col_c() * forward_axis + basis.col_a() * side_axis
-    }
-
-    fn update_collision_height(&mut self, dt: f32) {
-        let target = if self.is_crouching {
-            self.crouch_height
-        } else {
-            self.stand_height
-        };
-        self.current_height =
-            quake_physics::lerp_f32(self.current_height, target, self.crouch_lerp_speed * dt);
-
-        let Some(ref mut shape_node) = self.collision_shape else {
-            return;
-        };
-        let Some(shape_res) = shape_node.get_shape() else {
-            return;
-        };
-        if let Ok(mut capsule) = shape_res.try_cast::<CapsuleShape3D>() {
-            capsule.set_height(self.current_height);
-        }
     }
 }
