@@ -1,7 +1,8 @@
 //! First-person camera with Quake-style effects.
 //!
-//! Expects to be a child of [`crate::movement::QuakeController`].
-//! Reads parent state (velocity, grounded, crouching) each frame — never modifies movement.
+//! Works as a child of any node that exposes the required methods via Godot's `call()` API:
+//! `get_horizontal_speed`, `get_current_velocity`, `get_is_grounded`, `get_is_crouching`,
+//! `get_just_landed`. Reads parent state each frame — never modifies movement.
 //!
 //! Camera effects ported from Quake's `view.c`:
 //! - `V_CalcBob` — asymmetric walk bob proportional to speed
@@ -9,7 +10,6 @@
 //! - Landing tilt and crouch camera lerp (modern additions)
 //! - FOV scaling with speed (modern addition)
 
-use crate::movement::QuakeController;
 use crate::quake_physics;
 use godot::classes::{
     Camera3D, ICamera3D, Input, InputEvent, InputEventMouseButton, InputEventMouseMotion,
@@ -18,7 +18,7 @@ use godot::prelude::*;
 
 /// First-person camera with mouse look and Quake-style visual effects.
 ///
-/// Place as a child of [`QuakeController`].
+/// Place as a child of any node that exposes the required movement query methods.
 #[derive(GodotClass)]
 #[class(init, base=Camera3D)]
 pub struct QuakeCamera {
@@ -193,19 +193,8 @@ impl ICamera3D for QuakeCamera {
         let dt = crate::util::physics_dt();
         self.elapsed_time += dt;
 
-        // Read parent controller state.
-        let (speed, velocity, grounded, crouching, just_landed) =
-            self.get_controller()
-                .map_or((0.0, Vector3::ZERO, true, false, false), |controller| {
-                    let ctrl = controller.bind();
-                    (
-                        ctrl.get_horizontal_speed(),
-                        ctrl.get_current_velocity(),
-                        ctrl.get_is_grounded(),
-                        ctrl.get_is_crouching(),
-                        ctrl.get_just_landed(),
-                    )
-                });
+        // Read parent state via generic call() API — works with any parent node type.
+        let (speed, velocity, grounded, crouching, just_landed) = self.read_parent_state();
 
         self.update_fov(speed, dt);
         self.update_landing_tilt(just_landed, dt);
@@ -215,8 +204,36 @@ impl ICamera3D for QuakeCamera {
 }
 
 impl QuakeCamera {
-    fn get_controller(&self) -> Option<Gd<QuakeController>> {
-        self.base().get_parent()?.try_cast::<QuakeController>().ok()
+    /// Read movement state from the parent node via Godot's `call()` API.
+    ///
+    /// Returns sensible defaults when the parent is missing or lacks the expected methods.
+    fn read_parent_state(&self) -> (f32, Vector3, bool, bool, bool) {
+        let Some(mut parent) = self.base().get_parent() else {
+            return (0.0, Vector3::ZERO, true, false, false);
+        };
+
+        let speed = parent
+            .call("get_horizontal_speed", &[])
+            .try_to::<f32>()
+            .unwrap_or(0.0);
+        let velocity = parent
+            .call("get_current_velocity", &[])
+            .try_to::<Vector3>()
+            .unwrap_or(Vector3::ZERO);
+        let grounded = parent
+            .call("get_is_grounded", &[])
+            .try_to::<bool>()
+            .unwrap_or(true);
+        let crouching = parent
+            .call("get_is_crouching", &[])
+            .try_to::<bool>()
+            .unwrap_or(false);
+        let just_landed = parent
+            .call("get_just_landed", &[])
+            .try_to::<bool>()
+            .unwrap_or(false);
+
+        (speed, velocity, grounded, crouching, just_landed)
     }
 
     fn update_fov(&mut self, speed: f32, dt: f32) {
