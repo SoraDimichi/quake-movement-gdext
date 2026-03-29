@@ -130,16 +130,41 @@ pub struct QuakeController {
     #[init(val = 0.0)]
     bhop_multiplier_val: f32,
 
+    // Cached StringNames (populated in ready).
+    #[init(val = StringName::default())]
+    sn_jump: StringName,
+
+    #[init(val = StringName::default())]
+    sn_crouch: StringName,
+
+    #[init(val = StringName::default())]
+    sn_fwd: StringName,
+
+    #[init(val = StringName::default())]
+    sn_back: StringName,
+
+    #[init(val = StringName::default())]
+    sn_left: StringName,
+
+    #[init(val = StringName::default())]
+    sn_right: StringName,
+
     base: Base<CharacterBody3D>,
 }
 
 #[godot_api]
 impl ICharacterBody3D for QuakeController {
     fn ready(&mut self) {
-        // Auto-discover collision shape if not wired via export.
         if self.collision_shape.is_none() {
             self.collision_shape = self.base().try_get_node_as::<CollisionShape3D>("Collision");
         }
+        // Cache StringNames from GString exports.
+        self.sn_fwd = StringName::from(&self.move_forward_action);
+        self.sn_back = StringName::from(&self.move_backward_action);
+        self.sn_left = StringName::from(&self.move_left_action);
+        self.sn_right = StringName::from(&self.move_right_action);
+        self.sn_jump = StringName::from(&self.jump_action);
+        self.sn_crouch = StringName::from(&self.crouch_action);
     }
 
     fn physics_process(&mut self, delta: f64) {
@@ -148,7 +173,7 @@ impl ICharacterBody3D for QuakeController {
         self.just_landed_flag = !self.was_on_floor && on_floor;
 
         let input = Input::singleton();
-        let wants_crouch = input.is_action_pressed(&StringName::from(&self.crouch_action));
+        let wants_crouch = input.is_action_pressed(&self.sn_crouch);
         if wants_crouch && !self.is_crouching {
             self.duck();
         } else if !wants_crouch && self.is_crouching {
@@ -166,17 +191,6 @@ impl ICharacterBody3D for QuakeController {
 // -- Public API --
 #[godot_api]
 impl QuakeController {
-    #[must_use]
-    pub fn accelerate(
-        prev_velocity: Vector3,
-        accel_dir: Vector3,
-        accel: f32,
-        max_vel: f32,
-        dt: f32,
-    ) -> Vector3 {
-        quake_physics::accelerate(prev_velocity, accel_dir, accel, max_vel, dt)
-    }
-
     #[func]
     #[must_use]
     pub fn get_horizontal_speed(&self) -> f32 {
@@ -285,7 +299,7 @@ impl QuakeController {
         let mut vel = self.base().get_velocity();
         let wishdir = self.get_wishdir(input);
 
-        let space_held = input.is_action_pressed(&StringName::from(&self.jump_action));
+        let space_held = input.is_action_pressed(&self.sn_jump);
         let jump_action = self.jump_state.update(space_held, on_floor);
         let jumping = matches!(jump_action, JumpAction::Jump);
 
@@ -348,13 +362,8 @@ impl QuakeController {
             return Vector3::ZERO;
         }
         let basis = self.base().get_transform().basis;
-        let fwd = StringName::from(&self.move_forward_action);
-        let back = StringName::from(&self.move_backward_action);
-        let left = StringName::from(&self.move_left_action);
-        let right = StringName::from(&self.move_right_action);
-
-        let forward_axis = input.get_axis(&fwd, &back);
-        let side_axis = input.get_axis(&left, &right);
+        let forward_axis = input.get_axis(&self.sn_fwd, &self.sn_back);
+        let side_axis = input.get_axis(&self.sn_left, &self.sn_right);
 
         basis.col_c() * forward_axis + basis.col_a() * side_axis
     }
