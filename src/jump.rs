@@ -22,6 +22,7 @@ impl JumpState {
 }
 
 /// What the jump state decided this frame.
+#[derive(Clone, Copy)]
 pub enum JumpAction {
     None,
     Jump,

@@ -172,17 +172,32 @@ impl ICharacterBody3D for QuakeController {
         let on_floor = self.base().is_on_floor();
         self.just_landed_flag = !self.was_on_floor && on_floor;
 
+        if self.just_landed_flag {
+            self.signals().landed().emit();
+        }
+
         let input = Input::singleton();
         let wants_crouch = input.is_action_pressed(&self.sn_crouch);
         if wants_crouch && !self.is_crouching {
             self.duck();
+            self.signals().crouch_started().emit();
         } else if !wants_crouch && self.is_crouching {
+            let was_crouching = self.is_crouching;
             self.try_unduck();
+            if was_crouching && !self.is_crouching {
+                self.signals().crouch_ended().emit();
+            }
         }
 
-        let velocity = self.compute_velocity(dt, on_floor, &input);
+        let (velocity, jump_action) = self.compute_velocity(dt, on_floor, &input);
         self.base_mut().set_velocity(velocity);
         self.base_mut().move_and_slide();
+
+        match jump_action {
+            JumpAction::Jump => self.signals().jumped().emit(),
+            JumpAction::DoubleJump => self.signals().double_jumped().emit(),
+            JumpAction::None => {}
+        }
 
         self.was_on_floor = on_floor;
     }
@@ -191,6 +206,21 @@ impl ICharacterBody3D for QuakeController {
 // -- Public API --
 #[godot_api]
 impl QuakeController {
+    #[signal]
+    fn jumped();
+
+    #[signal]
+    fn double_jumped();
+
+    #[signal]
+    fn landed();
+
+    #[signal]
+    fn crouch_started();
+
+    #[signal]
+    fn crouch_ended();
+
     #[func]
     #[must_use]
     pub fn get_horizontal_speed(&self) -> f32 {
@@ -267,7 +297,12 @@ impl QuakeController {
             .map_or(self.stand_height, |c| c.get_height())
     }
 
-    fn compute_velocity(&mut self, dt: f32, on_floor: bool, input: &Gd<Input>) -> Vector3 {
+    fn compute_velocity(
+        &mut self,
+        dt: f32,
+        on_floor: bool,
+        input: &Gd<Input>,
+    ) -> (Vector3, JumpAction) {
         let mut vel = self.base().get_velocity();
         let wishdir = self.get_wishdir(input);
 
@@ -326,7 +361,7 @@ impl QuakeController {
             JumpAction::None => {}
         }
 
-        vel
+        (vel, jump_action)
     }
 
     fn get_wishdir(&self, input: &Gd<Input>) -> Vector3 {
