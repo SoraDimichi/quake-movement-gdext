@@ -1,8 +1,8 @@
 //! Quake-style movement controller for `CharacterBody3D`.
 //!
-//! Handles ground/air acceleration, friction, jump, crouch, and DUSK-style bhop.
 //! Crouch uses Half-Life 1 `PM_Duck`/`PM_UnDuck` pattern: instant hull switch.
-//! Does NOT handle camera — see [`crate::camera::QuakeCamera`].
+//! Jump uses `JumpState` for double jump support.
+//! Bhop uses DUSK-style per-jump speed multiplier.
 
 use crate::jump::{JumpAction, JumpState};
 use crate::quake_physics;
@@ -10,19 +10,14 @@ use godot::classes::{CapsuleShape3D, CharacterBody3D, CollisionShape3D, ICharact
 use godot::prelude::*;
 
 /// Quake-style first-person movement controller.
-///
-/// Movement: Quake `SV_Accelerate`/`SV_AirAccelerate`/`SV_UserFriction`.
-/// Bhop: DUSK-style per-jump speed multiplier.
-/// Crouch: Half-Life 1 instant hull switch with `test_move` anti-stuck.
 #[derive(GodotClass)]
 #[class(init, base=CharacterBody3D)]
 pub struct QuakeController {
-    /// Whether the character can move.
     #[export]
     #[init(val = true)]
     move_enabled: bool,
 
-    // -- Input Action Names --
+    // -- Input Actions (GString for editor, cached as StringName at runtime) --
     #[export]
     #[init(val = GString::from("move_forward"))]
     move_forward_action: GString,
@@ -47,7 +42,7 @@ pub struct QuakeController {
     #[init(val = GString::from("crouch"))]
     crouch_action: GString,
 
-    // -- Movement Parameters --
+    // -- Movement --
     #[export]
     #[init(val = 30.0)]
     gravity: f32,
@@ -93,34 +88,33 @@ pub struct QuakeController {
     #[init(val = 2.0)]
     bhop_decay: f32,
 
-    // -- Crouch (Half-Life 1 instant switch) --
-    /// Standing collision capsule height.
+    // -- Crouch --
     #[export]
     #[init(val = 1.8)]
     stand_height: f32,
 
-    /// Crouching collision capsule height.
     #[export]
     #[init(val = 0.9)]
     crouch_height: f32,
 
-    /// Speed multiplier while crouching.
     #[export]
     #[init(val = 0.5)]
     crouch_speed_factor: f32,
 
+    /// Collision shape to resize on crouch. Wire in editor.
+    #[export]
+    collision_shape: Option<Gd<CollisionShape3D>>,
+
     // -- Double Jump --
-    /// Double jump vertical force multiplier (relative to normal jump).
     #[export]
     #[init(val = 0.8)]
     double_jump_force: f32,
 
-    /// Horizontal speed boost on double jump.
     #[export]
     #[init(val = 3.0)]
     double_jump_boost: f32,
 
-    // -- Internal State --
+    // -- Internal --
     #[init(val = false)]
     is_crouching: bool,
 
@@ -143,14 +137,11 @@ pub struct QuakeController {
 impl ICharacterBody3D for QuakeController {
     fn physics_process(&mut self, delta: f64) {
         let dt = delta as f32;
-
         let on_floor = self.base().is_on_floor();
         self.just_landed_flag = !self.was_on_floor && on_floor;
 
-        // Half-Life 1 crouch: instant hull switch.
         let input = Input::singleton();
-        let crouch_name = StringName::from(&self.crouch_action);
-        let wants_crouch = input.is_action_pressed(&crouch_name);
+        let wants_crouch = input.is_action_pressed(&StringName::from(&self.crouch_action));
         if wants_crouch && !self.is_crouching {
             self.duck();
         } else if !wants_crouch && self.is_crouching {
@@ -165,6 +156,7 @@ impl ICharacterBody3D for QuakeController {
     }
 }
 
+// -- Public API --
 #[godot_api]
 impl QuakeController {
     #[must_use]
@@ -210,6 +202,7 @@ impl QuakeController {
     }
 }
 
+// -- Rust-only getters (for QuakeCamera) --
 impl QuakeController {
     #[must_use]
     pub fn horizontal_speed(&self) -> f32 {
@@ -243,18 +236,16 @@ impl QuakeController {
     }
 }
 
+// -- Private implementation --
 impl QuakeController {
-    /// Instantly switch to crouch hull (Half-Life `PM_Duck`).
     fn duck(&mut self) {
         self.is_crouching = true;
         self.set_hull_height(self.crouch_height);
     }
 
-    /// Try to uncrouch. If standing hull overlaps, stay ducked (Half-Life `PM_UnDuck`).
     fn try_unduck(&mut self) {
         let prev = self.get_hull_height();
         self.set_hull_height(self.stand_height);
-
         let transform = self.base().get_global_transform();
         if self.base_mut().test_move(transform, Vector3::ZERO) {
             self.set_hull_height(prev);
@@ -264,7 +255,7 @@ impl QuakeController {
     }
 
     fn set_hull_height(&self, height: f32) {
-        let Some(shape_node) = self.base().try_get_node_as::<CollisionShape3D>("Collision") else {
+        let Some(ref shape_node) = self.collision_shape else {
             return;
         };
         let Some(shape_res) = shape_node.get_shape() else {
@@ -276,8 +267,8 @@ impl QuakeController {
     }
 
     fn get_hull_height(&self) -> f32 {
-        self.base()
-            .try_get_node_as::<CollisionShape3D>("Collision")
+        self.collision_shape
+            .as_ref()
             .and_then(|n| n.get_shape())
             .and_then(|s| s.try_cast::<CapsuleShape3D>().ok())
             .map_or(self.stand_height, |c| c.get_height())
@@ -287,8 +278,7 @@ impl QuakeController {
         let mut vel = self.base().get_velocity();
         let wishdir = self.get_wishdir(input);
 
-        let jump_name = StringName::from(&self.jump_action);
-        let space_held = input.is_action_pressed(&jump_name);
+        let space_held = input.is_action_pressed(&StringName::from(&self.jump_action));
         let jump_action = self.jump_state.update(space_held, on_floor);
         let jumping = matches!(jump_action, JumpAction::Jump);
 
