@@ -135,6 +135,13 @@ pub struct QuakeController {
 
 #[godot_api]
 impl ICharacterBody3D for QuakeController {
+    fn ready(&mut self) {
+        // Auto-discover collision shape if not wired via export.
+        if self.collision_shape.is_none() {
+            self.collision_shape = self.base().try_get_node_as::<CollisionShape3D>("Collision");
+        }
+    }
+
     fn physics_process(&mut self, delta: f64) {
         let dt = delta as f32;
         let on_floor = self.base().is_on_floor();
